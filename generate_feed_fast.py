@@ -22,7 +22,7 @@ KEYWORDS = [
 
 HASH_FILE = "seen_item4.json"
 FEED_FILE = "feed.xml"       # keep your current feed name here
-BACKFILL_DAYS = 2            # Today + yesterday for 24-hour coverage
+BACKFILL_DAYS = 5            # Backfill test
 REQUEST_DELAY = 0.5          # SEC fair-access delay
 MAX_FEED_ITEMS = 50          # Keep feed manageable
 
