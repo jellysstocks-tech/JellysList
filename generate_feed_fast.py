@@ -39,11 +39,33 @@ def hash_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 def extract_item_4(text):
-    start = re.search(r'ITEM\s+4[\.\-–—:\s]*PURPOSE\s+OF\s+TRANSACTION', text, re.I)
+    # XML-style Item 4 (most modern filings)
+    xml_match = re.search(
+        r'<item[_\s]*4[^>]*>(.*?)</item[_\s]*4>',
+        text,
+        re.I | re.S
+    )
+    if xml_match:
+        return xml_match.group(1).strip()
+
+    # Fallback: legacy text filings
+    start = re.search(
+        r'ITEM\s+4[\.\-–—:\s]*PURPOSE\s+OF\s+TRANSACTION',
+        text,
+        re.I
+    )
     if not start:
         return None
-    end = re.search(r'ITEM\s+5[\.\-–—:\s]', text[start.end():], re.I)
-    return text[start.end(): start.end() + end.start()].strip() if end else text[start.end():].strip()
+
+    end = re.search(
+        r'ITEM\s+5[\.\-–—:\s]',
+        text[start.end():],
+        re.I
+    )
+    return (
+        text[start.end(): start.end() + end.start()].strip()
+        if end else text[start.end():].strip()
+    )
 
 def highlight_keywords(text):
     for kw in KEYWORDS:
