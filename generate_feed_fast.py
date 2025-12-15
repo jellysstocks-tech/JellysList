@@ -130,4 +130,4 @@ with open(FEED_FILE, "w", encoding="utf-8") as f:
 with open(HASH_FILE, "w", encoding="utf-8") as f:
     json.dump(seen_hashes, f, indent=2)
 
-print(f"Feed generated in {FEED_FILE} with {len(items)} item(s).")p
+print(f"Feed generated in {FEED_FILE} with {len(items)} item(s).")
