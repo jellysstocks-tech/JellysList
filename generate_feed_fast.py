@@ -12,7 +12,7 @@ import io
 
 # --- User Config ---
 HEADERS = {
-    "User-Agent": "JellysList-FastAlert/1.0 (contact: jellysstocks@gmail.com)"
+    "User-Agent": "JellysList-FastAlert/1.1 (contact: jellysstocks@gmail.com)"
 }
 
 KEYWORDS = [
@@ -21,9 +21,10 @@ KEYWORDS = [
 ]
 
 HASH_FILE = "seen_item4.json"
-FEED_FILE = "feed.xml"
-BACKFILL_DAYS = 2  # Today + yesterday to ensure 24-hour coverage
-REQUEST_DELAY = 0.5  # seconds between filing fetches
+FEED_FILE = "feed.xml"       # keep your current feed name here
+BACKFILL_DAYS = 2            # Today + yesterday for 24-hour coverage
+REQUEST_DELAY = 0.5          # SEC fair-access delay
+MAX_FEED_ITEMS = 50          # Keep feed manageable
 
 # --- Load previous hashes ---
 if os.path.exists(HASH_FILE):
@@ -48,6 +49,9 @@ def highlight_keywords(text):
         pattern = re.compile(re.escape(kw), re.IGNORECASE)
         text = pattern.sub(lambda m: f"<strong>{m.group(0)}</strong>", text)
     return text
+
+def highlight_company(text, company):
+    return re.sub(re.escape(company), f"<strong>{company}</strong>", text, flags=re.IGNORECASE)
 
 def get_index_urls_for_date(date):
     base = "https://www.sec.gov/Archives/edgar/daily-index"
@@ -89,7 +93,6 @@ def parse_master_index(url):
         if form_type not in ["SC 13D", "SC 13D/A"]:
             continue
         filing_dt = datetime.strptime(date_filed, "%Y-%m-%d")
-        # Only include filings in the last BACKFILL_DAYS
         if filing_dt < datetime.utcnow() - timedelta(days=BACKFILL_DAYS):
             continue
         entries.append({
@@ -131,16 +134,24 @@ for day_offset in range(BACKFILL_DAYS):
             if not item4:
                 continue
 
+            # Highlight keywords & company
             highlighted = highlight_keywords(item4)
-            item_hash = hash_text(highlighted)
+            highlighted = highlight_company(highlighted, f["company"])
 
+            # Deduplication
+            item_hash = hash_text(highlighted)
             if seen_hashes.get(f["path"]) == item_hash:
                 continue
             seen_hashes[f["path"]] = item_hash
 
+            # Filing type label & emoji
+            label = "NEW" if f["form_type"] == "SC 13D" else "AMENDED"
+            emoji = "⚡" if label == "NEW" else "🔄"
+
             items.append({
-                "title": f"[{f['form_type']}] {f['company']}",
+                "title": f"[{label}] {emoji} {f['company']} ({f['form_type']})",
                 "link": f"https://www.sec.gov/Archives/{f['path']}",
+                "index_link": f"https://www.sec.gov/Archives/edgar/data/{f['cik']}/{f['path'].split('/')[-1]}",
                 "content": highlighted,
                 "date": datetime.strptime(f["date_filed"], "%Y-%m-%d")
             })
@@ -149,16 +160,17 @@ for day_offset in range(BACKFILL_DAYS):
 with open(FEED_FILE, "w", encoding="utf-8") as f:
     f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
     f.write('<rss version="2.0"><channel>\n')
-    f.write('<title>SEC Schedule 13D Item 4 (Fast Alert)</title>\n')
+    f.write('<title>SEC Schedule 13D Item 4 (Fast Alert Enhanced)</title>\n')
     f.write('<link>https://www.sec.gov</link>\n')
-    f.write('<description>Item 4 from Schedule 13D and 13D/A filings containing buyout-related keywords</description>\n')
+    f.write('<description>Item 4 from SC 13D and 13D/A filings containing buyout-related keywords, enhanced for fast alerts</description>\n')
 
-    for i in sorted(items, key=lambda x: x["date"], reverse=True)[:50]:
+    # Sort by timestamp descending, keep only most recent items
+    for i in sorted(items, key=lambda x: x["date"], reverse=True)[:MAX_FEED_ITEMS]:
         f.write("<item>\n")
         f.write(f"<title>{i['title']}</title>\n")
         f.write(f"<link>{i['link']}</link>\n")
         f.write(f"<pubDate>{format_datetime(i['date'])}</pubDate>\n")
-        f.write(f"<description><![CDATA[{i['content']}]]></description>\n")
+        f.write(f"<description><![CDATA[{i['content']}<br><a href='{i['index_link']}'>Full Filing Index</a>]]></description>\n")
         f.write("</item>\n")
 
     f.write("</channel></rss>")
@@ -167,4 +179,4 @@ with open(FEED_FILE, "w", encoding="utf-8") as f:
 with open(HASH_FILE, "w", encoding="utf-8") as f:
     json.dump(seen_hashes, f, indent=2)
 
-print(f"Feed generated with {len(items)} items (last {BACKFILL_DAYS} days).")
+print(f"Enhanced feed generated with {len(items)} items (last {BACKFILL_DAYS} days).")
