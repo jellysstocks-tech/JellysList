@@ -12,7 +12,8 @@ import io
 
 # --- User Config ---
 HEADERS = {
-    "User-Agent": "JellysList-FastAlert/1.1 (contact: jellysstocks@gmail.com)"
+    "User-Agent": "JellysList-FastAlert/1.1 (contact: jellysstocks@gmail.com)",
+    "Accept-Encoding": "gzip, deflate"
 }
 
 KEYWORDS = [
