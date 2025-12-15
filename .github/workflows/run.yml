@@ -1,33 +1,22 @@
-name: Update SEC Feed (JellysList)
+name: Fast SEC Feed Update (JellysList)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # every 5 minutes
+    - cron: '*/5 * * * *'  # every 5 minutes
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      # Step 1: Checkout repository
-      - uses: actions/checkout@v4
-
-      # Step 2: Setup Python
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
-
-      # Step 3: Install dependencies
-      - run: pip install feedparser requests beautifulsoup4 lxml
-
-      # Step 4: Run the feed generator
-      - run: python generate_feed.py
-
-      # Step 5: Commit and push updated feed and hash file
-      - run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add feed.xml seen_item4.json
-          git commit -m "Update JellysList feed" || echo "No changes"
-          git push
+          python-version: 3.11
+      - run: pip install requests beautifulsoup4 lxml
+      - run: python generate_feed_fast.py
+      - run: git config --global user.name "github-actions"
+      - run: git config --global user.email "actions@github.com"
+      - run: git add feed.xml seen_item4.json
+      - run: git commit -m "Update fast-alert feed" || echo "No changes"
+      - run: git push
