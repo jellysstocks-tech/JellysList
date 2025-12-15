@@ -12,13 +12,13 @@ import io
 
 # --- User Config ---
 HEADERS = {
-    "User-Agent": "JellysList-FastAlert/1.1 (contact: jellysstocks@gmail.com)",
+    "User-Agent": "JellysList-FastAlert/1.3 (contact: jellysstocks@gmail.com)",
     "Accept-Encoding": "gzip, deflate"
 }
 
 KEYWORDS = [
     "100%", "100 %", "all shares", "fully acquire", "buyout",
-    "takeover", "converted", "merger agreement"
+    "takeover", "converted", "merger"
 ]
 
 HASH_FILE = "seen_item4.json"
@@ -26,6 +26,8 @@ FEED_FILE = "feed.xml"
 BACKFILL_DAYS = 7
 REQUEST_DELAY = 0.5
 MAX_FEED_ITEMS = 50
+MAX_RETRIES = 3
+RETRY_DELAY = 5  # seconds
 
 # --- Load previous hashes ---
 if os.path.exists(HASH_FILE):
@@ -40,7 +42,7 @@ def hash_text(text):
 
 def extract_item_4(text):
     """Extract Item 4 from filing text (XML or plain text)."""
-    # XML-style Item 4 (common in modern filings)
+    # XML-style
     match = re.search(r'<ITEM>4[\s\S]*?<TEXT>(.*?)</TEXT>', text, re.I)
     if match:
         return match.group(1).strip()
@@ -62,53 +64,6 @@ def highlight_company(text, company):
 
 def keyword_match(text):
     return any(re.search(re.escape(k), text, re.I) for k in KEYWORDS)
-
-def fetch_filing_text(submission_path=None, test_url=None):
-    """
-    Fetch the primary SC 13D or 13D/A document text.
-    If test_url is provided, fetch that URL directly for testing.
-    """
-    try:
-        if test_url:
-            url = test_url
-        else:
-            base_dir = submission_path.rsplit("/", 1)[0]
-            index_url = f"https://www.sec.gov/Archives/{base_dir}-index.htm"
-            r = requests.get(index_url, headers=HEADERS, timeout=15)
-            time.sleep(REQUEST_DELAY)
-            if r.status_code != 200:
-                print(f"[WARN] Index page fetch failed: {index_url} ({r.status_code})")
-                return None
-            soup = BeautifulSoup(r.text, "html.parser")
-            table = soup.find("table", class_="tableFile")
-            if not table:
-                print(f"[WARN] No table found in index page: {index_url}")
-                return None
-            primary_doc_url = None
-            for row in table.find_all("tr")[1:]:
-                cols = row.find_all("td")
-                if not cols:
-                    continue
-                doc_type = cols[3].text.strip()
-                if doc_type.startswith("SC 13D"):
-                    href = cols[2].a["href"]
-                    primary_doc_url = f"https://www.sec.gov{href}"
-                    break
-            if not primary_doc_url:
-                print(f"[WARN] No SC 13D/13D-A document found in index page: {index_url}")
-                return None
-            url = primary_doc_url
-
-        r2 = requests.get(url, headers=HEADERS, timeout=15)
-        time.sleep(REQUEST_DELAY)
-        if r2.status_code != 200:
-            print(f"[WARN] Primary document fetch failed: {url} ({r2.status_code})")
-            return None
-        text = BeautifulSoup(r2.text, "lxml").get_text("\n")
-        return text
-    except Exception as e:
-        print(f"[ERROR] Exception fetching filing {submission_path or test_url}: {e}")
-        return None
 
 def get_index_urls_for_date(date):
     """Return master index URLs (.idx and .idx.gz) for a given date."""
@@ -166,55 +121,86 @@ def parse_master_index(url):
         })
     return entries
 
-# --- Main processing ---
+def fetch_filing_text(submission_path):
+    """Fetch the primary SC 13D/13D-A document text."""
+    try:
+        base_dir = submission_path.rsplit("/", 1)[0]
+        index_url = f"https://www.sec.gov/Archives/{base_dir}-index.htm"
+        r = requests.get(index_url, headers=HEADERS, timeout=15)
+        time.sleep(REQUEST_DELAY)
+        if r.status_code != 200:
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        table = soup.find("table", class_="tableFile")
+        if not table:
+            return None
+        primary_doc_url = None
+        for row in table.find_all("tr")[1:]:
+            cols = row.find_all("td")
+            if not cols:
+                continue
+            doc_type = cols[3].text.strip()
+            if doc_type.startswith("SC 13D"):
+                href = cols[2].a["href"]
+                primary_doc_url = f"https://www.sec.gov{href}"
+                break
+        if not primary_doc_url:
+            return None
+        r2 = requests.get(primary_doc_url, headers=HEADERS, timeout=15)
+        time.sleep(REQUEST_DELAY)
+        if r2.status_code != 200:
+            return None
+        return BeautifulSoup(r2.text, "lxml").get_text("\n")
+    except Exception:
+        return None
+
+# --- Main processing with retry logic ---
 items = []
 
-# --- Backfill from master index ---
 for day_offset in range(BACKFILL_DAYS):
     date = datetime.utcnow() - timedelta(days=day_offset)
-    for idx_url in get_index_urls_for_date(date):
-        filings = parse_master_index(idx_url)
-        for f in filings:
-            text = fetch_filing_text(f["path"])
-            if not text:
-                continue
-            if not keyword_match(text):
-                continue
-            item4 = extract_item_4(text)
-            if not item4:
-                continue
-            highlighted = highlight_keywords(item4)
-            highlighted = highlight_company(highlighted, f["company"])
-            item_hash = hash_text(highlighted)
-            if seen_hashes.get(f["path"]) == item_hash:
-                continue
-            seen_hashes[f["path"]] = item_hash
-            label = "NEW" if f["form_type"] == "SC 13D" else "AMENDED"
-            emoji = "⚡" if label == "NEW" else "🔄"
-            items.append({
-                "title": f"[{label}] {emoji} {f['company']} ({f['form_type']})",
-                "link": f"https://www.sec.gov/Archives/{f['path']}",
-                "content": highlighted,
-                "date": datetime.strptime(f["date_filed"], "%Y-%m-%d")
-            })
+    index_urls = get_index_urls_for_date(date)
 
-# --- Temporary test filing (replace or remove when index is live) ---
-TEST_URL = "https://www.sec.gov/Archives/edgar/data/1040130/000121390025120354/xslSCHEDULE_13D_X01/primary_doc.xml"
-text = fetch_filing_text(test_url=TEST_URL)
-if text and keyword_match(text):
-    item4 = extract_item_4(text)
-    if item4:
+    successful_index = False
+    for idx_url in index_urls:
+        for attempt in range(1, MAX_RETRIES + 1):
+            filings = parse_master_index(idx_url)
+            if filings:
+                successful_index = True
+                break
+            else:
+                print(f"[WARN] Failed to parse index {idx_url}, attempt {attempt}/{MAX_RETRIES}")
+                time.sleep(RETRY_DELAY)
+        if successful_index:
+            break
+
+    if not successful_index:
+        print(f"[ERROR] Could not fetch index for {date.strftime('%Y-%m-%d')}. Skipping this day.")
+        continue
+
+    for f in filings:
+        text = fetch_filing_text(f["path"])
+        if not text:
+            continue
+        if not keyword_match(text):
+            continue
+        item4 = extract_item_4(text)
+        if not item4:
+            continue
         highlighted = highlight_keywords(item4)
-        highlighted = highlight_company(highlighted, "SilverCape")
+        highlighted = highlight_company(highlighted, f["company"])
         item_hash = hash_text(highlighted)
-        if seen_hashes.get(TEST_URL) != item_hash:
-            seen_hashes[TEST_URL] = item_hash
-            items.append({
-                "title": "[AMENDED] 🔄 SilverCape (SC 13D/A)",
-                "link": TEST_URL,
-                "content": highlighted,
-                "date": datetime.utcnow()
-            })
+        if seen_hashes.get(f["path"]) == item_hash:
+            continue
+        seen_hashes[f["path"]] = item_hash
+        label = "NEW" if f["form_type"] == "SC 13D" else "AMENDED"
+        emoji = "⚡" if label == "NEW" else "🔄"
+        items.append({
+            "title": f"[{label}] {emoji} {f['company']} ({f['form_type']})",
+            "link": f"https://www.sec.gov/Archives/{f['path']}",
+            "content": highlighted,
+            "date": datetime.strptime(f["date_filed"], "%Y-%m-%d")
+        })
 
 # --- Generate RSS feed ---
 with open(FEED_FILE, "w", encoding="utf-8") as f:
@@ -228,7 +214,7 @@ with open(FEED_FILE, "w", encoding="utf-8") as f:
         f.write(f"<title>{i['title']}</title>\n")
         f.write(f"<link>{i['link']}</link>\n")
         f.write(f"<pubDate>{format_datetime(i['date'])}</pubDate>\n")
-        f.write(f"<description><![CDATA[{i['content']}]]></description>\n")
+        f.write(f"<description><![CDATA[{i['content']}<br><a href='{i['link']}'>Full Filing</a>]]></description>\n")
         f.write("</item>\n")
     f.write("</channel></rss>")
 
