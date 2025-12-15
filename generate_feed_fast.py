@@ -3,7 +3,7 @@ import requests
 import re
 import time
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.utils import format_datetime
 import json
 import hashlib
@@ -11,7 +11,7 @@ import os
 
 # --- User Config ---
 HEADERS = {
-    "User-Agent": "JellysList-FastAlert/1.1 (contact: jellysstocks@gmail.com)"
+    "User-Agent": "JellysList-FastAlert/1.5 (contact: jellysstocks@gmail.com)"
 }
 
 FEED_FILE = "feed.xml"
@@ -43,7 +43,7 @@ def hash_text(text):
 def extract_item_4(text):
     """Extract Item 4 from filing text."""
     # Try XML-style tags first
-    xml_match = re.search(r'<item[_\s]*4[^>]*>(.*?)</item[_\s]*4>', text, re.I | re.S)
+    xml_match = re.search(r'<ITEM[_\s]*4[^>]*>(.*?)</ITEM[_\s]*4>', text, re.I | re.S)
     if xml_match:
         return xml_match.group(1).strip()
     # Fallback: plain text filings
@@ -61,19 +61,22 @@ def highlight_keywords(text):
 def highlight_company(text, company):
     return re.sub(re.escape(company), f"<strong>{company}</strong>", text, flags=re.I)
 
-def get_primary_doc_url(entry_url):
-    """Fetch primary document URL from filing index page."""
+def keyword_match(text):
+    return any(re.search(re.escape(k), text, re.I) for k in KEYWORDS)
+
+def fetch_primary_doc(entry):
+    """
+    Construct the primary doc URL from the Atom entry.
+    This works for XML filings where tableFile parsing fails.
+    """
+    # Example: replace '-index.htm' with '/xslSCHEDULE_13D_X01/primary_doc.xml'
+    url = entry.link
+    primary_url = url.replace('-index.htm', '/xslSCHEDULE_13D_X01/primary_doc.xml')
     try:
-        r = requests.get(entry_url, headers=HEADERS, timeout=15)
+        r = requests.get(primary_url, headers=HEADERS, timeout=15)
         time.sleep(REQUEST_DELAY)
-        soup = BeautifulSoup(r.text, "html.parser")
-        table = soup.find("table", class_="tableFile")
-        if not table:
-            return None
-        for row in table.find_all("tr")[1:]:
-            cols = row.find_all("td")
-            if cols and cols[3].text.strip().startswith("SC 13D"):
-                return "https://www.sec.gov" + cols[2].a["href"]
+        if r.status_code == 200:
+            return BeautifulSoup(r.text, "lxml").get_text("\n")
     except Exception:
         return None
     return None
@@ -84,40 +87,27 @@ items = []
 for feed_url in FEEDS:
     feed = feedparser.parse(feed_url)
     for entry in feed.entries:
-        primary_url = get_primary_doc_url(entry.link)
-        if not primary_url:
+        text = fetch_primary_doc(entry)
+        if not text:
             continue
-        try:
-            r = requests.get(primary_url, headers=HEADERS, timeout=15)
-            time.sleep(REQUEST_DELAY)
-            text = BeautifulSoup(r.text, "lxml").get_text("\n")
-        except Exception:
+        if not keyword_match(text):
             continue
-
-        if not any(k.lower() in text.lower() for k in KEYWORDS):
-            continue
-
         item4 = extract_item_4(text)
         if not item4:
             continue
-
         highlighted = highlight_keywords(item4)
         highlighted = highlight_company(highlighted, entry.title)
-
-        # Deduplicate
         item_hash = hash_text(highlighted)
-        if seen_hashes.get(primary_url) == item_hash:
+        if seen_hashes.get(entry.id) == item_hash:
             continue
-        seen_hashes[primary_url] = item_hash
-
+        seen_hashes[entry.id] = item_hash
         form_type = "AMENDED" if "13D/A" in entry.title else "NEW"
         emoji = "⚡" if form_type == "NEW" else "🔄"
-
         items.append({
             "title": f"[{form_type}] {emoji} {entry.title}",
-            "link": primary_url,
+            "link": entry.link.replace('-index.htm', '/xslSCHEDULE_13D_X01/primary_doc.xml'),
             "content": highlighted,
-            "date": entry.published_parsed
+            "date": datetime(*entry.published_parsed[:6])
         })
 
 # --- Generate RSS feed ---
@@ -127,19 +117,17 @@ with open(FEED_FILE, "w", encoding="utf-8") as f:
     f.write('<title>SEC Schedule 13D Item 4 (Fast Alert)</title>\n')
     f.write('<link>https://www.sec.gov</link>\n')
     f.write('<description>Item 4 from SC 13D and 13D/A filings containing buyout-related keywords</description>\n')
-
     for i in sorted(items, key=lambda x: x["date"], reverse=True)[:MAX_FEED_ITEMS]:
         f.write("<item>\n")
         f.write(f"<title>{i['title']}</title>\n")
         f.write(f"<link>{i['link']}</link>\n")
-        f.write(f"<pubDate>{format_datetime(datetime(*i['date'][:6]))}</pubDate>\n")
-        f.write(f"<description><![CDATA[{i['content']}]]></description>\n")
+        f.write(f"<pubDate>{format_datetime(i['date'])}</pubDate>\n")
+        f.write(f"<description><![CDATA[{i['content']}<br><a href='{i['link']}'>Full Filing</a>]]></description>\n")
         f.write("</item>\n")
-
     f.write("</channel></rss>")
 
 # --- Save hash record ---
 with open(HASH_FILE, "w", encoding="utf-8") as f:
     json.dump(seen_hashes, f, indent=2)
 
-print(f"Feed generated in {FEED_FILE} with {len(items)} item(s).")
+print(f"Feed generated in {FEED_FILE} with {len(items)} item(s).")p
