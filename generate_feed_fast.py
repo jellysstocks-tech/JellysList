@@ -12,13 +12,13 @@ import io
 
 # --- User Config ---
 HEADERS = {
-    "User-Agent": "JellysList-FastAlert/1.3 (contact: jellysstocks@gmail.com)",
+    "User-Agent": "JellysList-FastAlert/1.4 (contact: jellysstocks@gmail.com)",
     "Accept-Encoding": "gzip, deflate"
 }
 
 KEYWORDS = [
     "100%", "100 %", "all shares", "fully acquire", "buyout",
-    "takeover", "converted", "merger"
+    "takeover", "converted", "merger agreement"
 ]
 
 HASH_FILE = "seen_item4.json"
@@ -69,15 +69,11 @@ def get_index_urls_for_date(date):
     """Return master index URLs (.idx and .idx.gz) for a given date."""
     base = "https://www.sec.gov/Archives/edgar/daily-index"
     yyyy = date.year
-    mm = date.month
-    dd = date.strftime("%d")
-    if mm <= 3: qtr = "QTR1"
-    elif mm <= 6: qtr = "QTR2"
-    elif mm <= 9: qtr = "QTR3"
-    else: qtr = "QTR4"
+    mm = f"{date.month:02d}"  # use month folder
+    dd = f"{date.day:02d}"
     return [
-        f"{base}/{yyyy}/{qtr}/master.{yyyy}{mm:02d}{dd}.idx.gz",
-        f"{base}/{yyyy}/{qtr}/master.{yyyy}{mm:02d}{dd}.idx"
+        f"{base}/{yyyy}/{mm}/master.{yyyy}{mm}{dd}.idx.gz",
+        f"{base}/{yyyy}/{mm}/master.{yyyy}{mm}{dd}.idx"
     ]
 
 def parse_master_index(url):
