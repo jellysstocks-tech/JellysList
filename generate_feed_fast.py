@@ -1,33 +1,33 @@
+import feedparser
 import requests
 import re
 import time
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
+from datetime import datetime
 from email.utils import format_datetime
 import json
 import hashlib
 import os
-import gzip
-import io
 
 # --- User Config ---
 HEADERS = {
-    "User-Agent": "JellysList-FastAlert/1.4 (contact: jellysstocks@gmail.com)",
-    "Accept-Encoding": "gzip, deflate"
+    "User-Agent": "JellysList-FastAlert/1.1 (contact: jellysstocks@gmail.com)"
 }
+
+FEED_FILE = "feed.xml"
+HASH_FILE = "seen_item4.json"
+MAX_FEED_ITEMS = 50
+REQUEST_DELAY = 1  # SEC fair-access delay in seconds
+
+FEEDS = [
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=SC%2013D&owner=include&count=100&output=atom",
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=SC%2013D/A&owner=include&count=100&output=atom"
+]
 
 KEYWORDS = [
     "100%", "100 %", "all shares", "fully acquire", "buyout",
     "takeover", "converted", "merger agreement"
 ]
-
-HASH_FILE = "seen_item4.json"
-FEED_FILE = "feed.xml"
-BACKFILL_DAYS = 7
-REQUEST_DELAY = 0.5
-MAX_FEED_ITEMS = 50
-MAX_RETRIES = 3
-RETRY_DELAY = 5  # seconds
 
 # --- Load previous hashes ---
 if os.path.exists(HASH_FILE):
@@ -41,12 +41,12 @@ def hash_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 def extract_item_4(text):
-    """Extract Item 4 from filing text (XML or plain text)."""
-    # XML-style
-    match = re.search(r'<ITEM>4[\s\S]*?<TEXT>(.*?)</TEXT>', text, re.I)
-    if match:
-        return match.group(1).strip()
-    # Plain-text fallback
+    """Extract Item 4 from filing text."""
+    # Try XML-style tags first
+    xml_match = re.search(r'<item[_\s]*4[^>]*>(.*?)</item[_\s]*4>', text, re.I | re.S)
+    if xml_match:
+        return xml_match.group(1).strip()
+    # Fallback: plain text filings
     start = re.search(r'ITEM\s+4[\.\-–—:\s]*PURPOSE\s+OF\s+TRANSACTION', text, re.I)
     if not start:
         return None
@@ -55,167 +55,91 @@ def extract_item_4(text):
 
 def highlight_keywords(text):
     for kw in KEYWORDS:
-        pattern = re.compile(re.escape(kw), re.I)
-        text = pattern.sub(lambda m: f"<strong>{m.group(0)}</strong>", text)
+        text = re.sub(re.escape(kw), lambda m: f"<strong>{m.group(0)}</strong>", text, flags=re.I)
     return text
 
 def highlight_company(text, company):
     return re.sub(re.escape(company), f"<strong>{company}</strong>", text, flags=re.I)
 
-def keyword_match(text):
-    return any(re.search(re.escape(k), text, re.I) for k in KEYWORDS)
-
-def get_index_urls_for_date(date):
-    """Return master index URLs (.idx and .idx.gz) for a given date."""
-    base = "https://www.sec.gov/Archives/edgar/daily-index"
-    yyyy = date.year
-    mm = f"{date.month:02d}"  # use month folder
-    dd = f"{date.day:02d}"
-    return [
-        f"{base}/{yyyy}/{mm}/master.{yyyy}{mm}{dd}.idx.gz",
-        f"{base}/{yyyy}/{mm}/master.{yyyy}{mm}{dd}.idx"
-    ]
-
-def parse_master_index(url):
-    """Parse SEC master index to find SC 13D/13D/A filings."""
+def get_primary_doc_url(entry_url):
+    """Fetch primary document URL from filing index page."""
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
+        r = requests.get(entry_url, headers=HEADERS, timeout=15)
         time.sleep(REQUEST_DELAY)
-        if r.status_code != 200:
-            return []
-        content = r.content
-        if url.endswith(".gz"):
-            with gzip.GzipFile(fileobj=io.BytesIO(content)) as f:
-                content = f.read()
-        content = content.decode("latin1")
-    except Exception:
-        return []
-
-    entries = []
-    in_data = False
-    for line in content.splitlines():
-        if line.startswith("CIK|"):
-            in_data = True
-            continue
-        if not in_data:
-            continue
-        parts = line.split("|")
-        if len(parts) < 5:
-            continue
-        cik, company, form_type, date_filed, path = parts
-        if form_type not in ("SC 13D", "SC 13D/A"):
-            continue
-        filing_dt = datetime.strptime(date_filed, "%Y-%m-%d")
-        if filing_dt < datetime.utcnow() - timedelta(days=BACKFILL_DAYS):
-            continue
-        entries.append({
-            "cik": cik,
-            "company": company,
-            "form_type": form_type,
-            "date_filed": date_filed,
-            "path": path
-        })
-    return entries
-
-def fetch_filing_text(submission_path):
-    """Fetch the primary SC 13D/13D-A document text."""
-    try:
-        base_dir = submission_path.rsplit("/", 1)[0]
-        index_url = f"https://www.sec.gov/Archives/{base_dir}-index.htm"
-        r = requests.get(index_url, headers=HEADERS, timeout=15)
-        time.sleep(REQUEST_DELAY)
-        if r.status_code != 200:
-            return None
         soup = BeautifulSoup(r.text, "html.parser")
         table = soup.find("table", class_="tableFile")
         if not table:
             return None
-        primary_doc_url = None
         for row in table.find_all("tr")[1:]:
             cols = row.find_all("td")
-            if not cols:
-                continue
-            doc_type = cols[3].text.strip()
-            if doc_type.startswith("SC 13D"):
-                href = cols[2].a["href"]
-                primary_doc_url = f"https://www.sec.gov{href}"
-                break
-        if not primary_doc_url:
-            return None
-        r2 = requests.get(primary_doc_url, headers=HEADERS, timeout=15)
-        time.sleep(REQUEST_DELAY)
-        if r2.status_code != 200:
-            return None
-        return BeautifulSoup(r2.text, "lxml").get_text("\n")
+            if cols and cols[3].text.strip().startswith("SC 13D"):
+                return "https://www.sec.gov" + cols[2].a["href"]
     except Exception:
         return None
+    return None
 
-# --- Main processing with retry logic ---
+# --- Main processing ---
 items = []
 
-for day_offset in range(BACKFILL_DAYS):
-    date = datetime.utcnow() - timedelta(days=day_offset)
-    index_urls = get_index_urls_for_date(date)
-
-    successful_index = False
-    for idx_url in index_urls:
-        for attempt in range(1, MAX_RETRIES + 1):
-            filings = parse_master_index(idx_url)
-            if filings:
-                successful_index = True
-                break
-            else:
-                print(f"[WARN] Failed to parse index {idx_url}, attempt {attempt}/{MAX_RETRIES}")
-                time.sleep(RETRY_DELAY)
-        if successful_index:
-            break
-
-    if not successful_index:
-        print(f"[ERROR] Could not fetch index for {date.strftime('%Y-%m-%d')}. Skipping this day.")
-        continue
-
-    for f in filings:
-        text = fetch_filing_text(f["path"])
-        if not text:
+for feed_url in FEEDS:
+    feed = feedparser.parse(feed_url)
+    for entry in feed.entries:
+        primary_url = get_primary_doc_url(entry.link)
+        if not primary_url:
             continue
-        if not keyword_match(text):
+        try:
+            r = requests.get(primary_url, headers=HEADERS, timeout=15)
+            time.sleep(REQUEST_DELAY)
+            text = BeautifulSoup(r.text, "lxml").get_text("\n")
+        except Exception:
             continue
+
+        if not any(k.lower() in text.lower() for k in KEYWORDS):
+            continue
+
         item4 = extract_item_4(text)
         if not item4:
             continue
+
         highlighted = highlight_keywords(item4)
-        highlighted = highlight_company(highlighted, f["company"])
+        highlighted = highlight_company(highlighted, entry.title)
+
+        # Deduplicate
         item_hash = hash_text(highlighted)
-        if seen_hashes.get(f["path"]) == item_hash:
+        if seen_hashes.get(primary_url) == item_hash:
             continue
-        seen_hashes[f["path"]] = item_hash
-        label = "NEW" if f["form_type"] == "SC 13D" else "AMENDED"
-        emoji = "⚡" if label == "NEW" else "🔄"
+        seen_hashes[primary_url] = item_hash
+
+        form_type = "AMENDED" if "13D/A" in entry.title else "NEW"
+        emoji = "⚡" if form_type == "NEW" else "🔄"
+
         items.append({
-            "title": f"[{label}] {emoji} {f['company']} ({f['form_type']})",
-            "link": f"https://www.sec.gov/Archives/{f['path']}",
+            "title": f"[{form_type}] {emoji} {entry.title}",
+            "link": primary_url,
             "content": highlighted,
-            "date": datetime.strptime(f["date_filed"], "%Y-%m-%d")
+            "date": entry.published_parsed
         })
 
 # --- Generate RSS feed ---
 with open(FEED_FILE, "w", encoding="utf-8") as f:
     f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
     f.write('<rss version="2.0"><channel>\n')
-    f.write('<title>SEC Schedule 13D Item 4 (Fast Alert Enhanced)</title>\n')
+    f.write('<title>SEC Schedule 13D Item 4 (Fast Alert)</title>\n')
     f.write('<link>https://www.sec.gov</link>\n')
     f.write('<description>Item 4 from SC 13D and 13D/A filings containing buyout-related keywords</description>\n')
+
     for i in sorted(items, key=lambda x: x["date"], reverse=True)[:MAX_FEED_ITEMS]:
         f.write("<item>\n")
         f.write(f"<title>{i['title']}</title>\n")
         f.write(f"<link>{i['link']}</link>\n")
-        f.write(f"<pubDate>{format_datetime(i['date'])}</pubDate>\n")
-        f.write(f"<description><![CDATA[{i['content']}<br><a href='{i['link']}'>Full Filing</a>]]></description>\n")
+        f.write(f"<pubDate>{format_datetime(datetime(*i['date'][:6]))}</pubDate>\n")
+        f.write(f"<description><![CDATA[{i['content']}]]></description>\n")
         f.write("</item>\n")
+
     f.write("</channel></rss>")
 
 # --- Save hash record ---
 with open(HASH_FILE, "w", encoding="utf-8") as f:
     json.dump(seen_hashes, f, indent=2)
 
-print(f"Enhanced feed generated in {FEED_FILE} with {len(items)} item(s) (last {BACKFILL_DAYS} days).")
+print(f"Feed generated in {FEED_FILE} with {len(items)} item(s).")
