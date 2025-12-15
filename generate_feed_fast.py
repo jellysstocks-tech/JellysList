@@ -7,12 +7,13 @@ from email.utils import format_datetime
 import json
 import hashlib
 import os
+import gzip
+import io
 
 # --- User Config ---
 HEADERS = {
     "User-Agent": "JellysList-FastAlert/1.1 (contact: jellysstocks@gmail.com)",
-    "Accept-Encoding": "gzip, deflate",
-    "Host": "www.sec.gov"
+    "Accept-Encoding": "gzip, deflate"
 }
 
 KEYWORDS = [
@@ -22,9 +23,9 @@ KEYWORDS = [
 
 HASH_FILE = "seen_item4.json"
 FEED_FILE = "feed.xml"
-BACKFILL_DAYS = 7      # number of days to look back
-REQUEST_DELAY = 0.5    # SEC fair-access delay
-MAX_FEED_ITEMS = 50    # maximum items in feed
+BACKFILL_DAYS = 7
+REQUEST_DELAY = 0.5
+MAX_FEED_ITEMS = 50
 
 # --- Load previous hashes ---
 if os.path.exists(HASH_FILE):
@@ -39,16 +40,16 @@ def hash_text(text):
 
 def extract_item_4(text):
     """Extract Item 4 from filing text (XML or plain text)."""
-    # XML-style Item 4
-    match = re.search(r'<item[_\s]*4.*?>(.*?)</item[_\s]*4>', text, re.I | re.S)
+    # XML-style Item 4 (common in modern filings)
+    match = re.search(r'<ITEM>4[\s\S]*?<TEXT>(.*?)</TEXT>', text, re.I)
     if match:
         return match.group(1).strip()
-    # Plain text fallback
+    # Plain-text fallback
     start = re.search(r'ITEM\s+4[\.\-–—:\s]*PURPOSE\s+OF\s+TRANSACTION', text, re.I)
     if not start:
         return None
     end = re.search(r'ITEM\s+5[\.\-–—:\s]', text[start.end():], re.I)
-    return (text[start.end(): start.end()+end.start()].strip() if end else text[start.end():].strip())
+    return (text[start.end(): start.end() + end.start()].strip() if end else text[start.end():].strip())
 
 def highlight_keywords(text):
     for kw in KEYWORDS:
@@ -59,55 +60,58 @@ def highlight_keywords(text):
 def highlight_company(text, company):
     return re.sub(re.escape(company), f"<strong>{company}</strong>", text, flags=re.I)
 
-def keyword_match(text, keywords):
-    for kw in keywords:
-        if re.search(re.escape(kw), text, re.I):
-            return True
-    return False
+def keyword_match(text):
+    return any(re.search(re.escape(k), text, re.I) for k in KEYWORDS)
 
-def fetch_filing_text(submission_path):
+def fetch_filing_text(submission_path=None, test_url=None):
     """
-    Given a submission path, fetches the primary SC 13D/13D-A document text from SEC.
+    Fetch the primary SC 13D or 13D/A document text.
+    If test_url is provided, fetch that URL directly for testing.
     """
-    base_dir = submission_path.rsplit("/", 1)[0]
-    index_url = f"https://www.sec.gov/Archives/{base_dir}-index.htm"
     try:
-        r = requests.get(index_url, headers=HEADERS, timeout=15)
-        time.sleep(REQUEST_DELAY)
-        if r.status_code != 200:
-            print(f"[WARN] Index page fetch failed: {index_url} ({r.status_code})")
-            return None
-        soup = BeautifulSoup(r.text, "html.parser")
-        table = soup.find("table", class_="tableFile")
-        if not table:
-            print(f"[WARN] No table found in index page: {index_url}")
-            return None
-        primary_doc_url = None
-        for row in table.find_all("tr")[1:]:
-            cols = row.find_all("td")
-            if not cols:
-                continue
-            doc_type = cols[3].text.strip()
-            if doc_type.startswith("SC 13D"):
-                href = cols[2].a["href"]
-                primary_doc_url = f"https://www.sec.gov{href}"
-                break
-        if not primary_doc_url:
-            print(f"[WARN] No SC 13D/13D-A document found in index page: {index_url}")
-            return None
-        r2 = requests.get(primary_doc_url, headers=HEADERS, timeout=15)
+        if test_url:
+            url = test_url
+        else:
+            base_dir = submission_path.rsplit("/", 1)[0]
+            index_url = f"https://www.sec.gov/Archives/{base_dir}-index.htm"
+            r = requests.get(index_url, headers=HEADERS, timeout=15)
+            time.sleep(REQUEST_DELAY)
+            if r.status_code != 200:
+                print(f"[WARN] Index page fetch failed: {index_url} ({r.status_code})")
+                return None
+            soup = BeautifulSoup(r.text, "html.parser")
+            table = soup.find("table", class_="tableFile")
+            if not table:
+                print(f"[WARN] No table found in index page: {index_url}")
+                return None
+            primary_doc_url = None
+            for row in table.find_all("tr")[1:]:
+                cols = row.find_all("td")
+                if not cols:
+                    continue
+                doc_type = cols[3].text.strip()
+                if doc_type.startswith("SC 13D"):
+                    href = cols[2].a["href"]
+                    primary_doc_url = f"https://www.sec.gov{href}"
+                    break
+            if not primary_doc_url:
+                print(f"[WARN] No SC 13D/13D-A document found in index page: {index_url}")
+                return None
+            url = primary_doc_url
+
+        r2 = requests.get(url, headers=HEADERS, timeout=15)
         time.sleep(REQUEST_DELAY)
         if r2.status_code != 200:
-            print(f"[WARN] Primary document fetch failed: {primary_doc_url} ({r2.status_code})")
+            print(f"[WARN] Primary document fetch failed: {url} ({r2.status_code})")
             return None
         text = BeautifulSoup(r2.text, "lxml").get_text("\n")
         return text
     except Exception as e:
-        print(f"[ERROR] Exception fetching filing {submission_path}: {e}")
+        print(f"[ERROR] Exception fetching filing {submission_path or test_url}: {e}")
         return None
 
 def get_index_urls_for_date(date):
-    """Returns SEC master index URLs for a given date (both .idx and .idx.gz)."""
+    """Return master index URLs (.idx and .idx.gz) for a given date."""
     base = "https://www.sec.gov/Archives/edgar/daily-index"
     yyyy = date.year
     mm = date.month
@@ -122,8 +126,7 @@ def get_index_urls_for_date(date):
     ]
 
 def parse_master_index(url):
-    """Parses a SEC master index file to find SC 13D and 13D/A filings."""
-    import gzip, io
+    """Parse SEC master index to find SC 13D/13D/A filings."""
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         time.sleep(REQUEST_DELAY)
@@ -136,6 +139,7 @@ def parse_master_index(url):
         content = content.decode("latin1")
     except Exception:
         return []
+
     entries = []
     in_data = False
     for line in content.splitlines():
@@ -165,6 +169,7 @@ def parse_master_index(url):
 # --- Main processing ---
 items = []
 
+# --- Backfill from master index ---
 for day_offset in range(BACKFILL_DAYS):
     date = datetime.utcnow() - timedelta(days=day_offset)
     for idx_url in get_index_urls_for_date(date):
@@ -173,7 +178,7 @@ for day_offset in range(BACKFILL_DAYS):
             text = fetch_filing_text(f["path"])
             if not text:
                 continue
-            if not keyword_match(text, KEYWORDS):
+            if not keyword_match(text):
                 continue
             item4 = extract_item_4(text)
             if not item4:
@@ -191,6 +196,24 @@ for day_offset in range(BACKFILL_DAYS):
                 "link": f"https://www.sec.gov/Archives/{f['path']}",
                 "content": highlighted,
                 "date": datetime.strptime(f["date_filed"], "%Y-%m-%d")
+            })
+
+# --- Temporary test filing (replace or remove when index is live) ---
+TEST_URL = "https://www.sec.gov/Archives/edgar/data/1040130/000121390025120354/xslSCHEDULE_13D_X01/primary_doc.xml"
+text = fetch_filing_text(test_url=TEST_URL)
+if text and keyword_match(text):
+    item4 = extract_item_4(text)
+    if item4:
+        highlighted = highlight_keywords(item4)
+        highlighted = highlight_company(highlighted, "SilverCape")
+        item_hash = hash_text(highlighted)
+        if seen_hashes.get(TEST_URL) != item_hash:
+            seen_hashes[TEST_URL] = item_hash
+            items.append({
+                "title": "[AMENDED] 🔄 SilverCape (SC 13D/A)",
+                "link": TEST_URL,
+                "content": highlighted,
+                "date": datetime.utcnow()
             })
 
 # --- Generate RSS feed ---
