@@ -38,34 +38,25 @@ else:
 def hash_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-def extract_item_4(text):
-    # XML-style Item 4 (most modern filings)
-    xml_match = re.search(
-        r'<item[_\s]*4[^>]*>(.*?)</item[_\s]*4>',
-        text,
-        re.I | re.S
-    )
-    if xml_match:
-        return xml_match.group(1).strip()
+def is_xml(content):
+    return content.lstrip().startswith("<?xml") or "<DOCUMENT>" in content.upper()
 
-    # Fallback: legacy text filings
-    start = re.search(
-        r'ITEM\s+4[\.\-–—:\s]*PURPOSE\s+OF\s+TRANSACTION',
-        text,
-        re.I
-    )
+def extract_item_4_from_xml(xml):
+    match = re.search(r'<item[_\s]*4.*?>(.*?)</item[_\s]*4>', xml, re.I | re.S)
+    if match:
+        return match.group(1).strip()
+    # fallback: look inside <TEXT> blocks
+    match2 = re.search(r'<TEXT>(.*?)</TEXT>', xml, re.I | re.S)
+    if match2:
+        return match2.group(1).strip()
+    return None
+
+def extract_item_4_from_text(text):
+    start = re.search(r'ITEM\s+4[\.\-–—:\s]*PURPOSE\s+OF\s+TRANSACTION', text, re.I)
     if not start:
         return None
-
-    end = re.search(
-        r'ITEM\s+5[\.\-–—:\s]',
-        text[start.end():],
-        re.I
-    )
-    return (
-        text[start.end(): start.end() + end.start()].strip()
-        if end else text[start.end():].strip()
-    )
+    end = re.search(r'ITEM\s+5[\.\-–—:\s]', text[start.end():], re.I)
+    return text[start.end(): start.end() + end.start()].strip() if end else text[start.end():].strip()
 
 def highlight_keywords(text):
     for kw in KEYWORDS:
@@ -81,7 +72,6 @@ def get_index_urls_for_date(date):
     year = date.year
     month = date.month
     day = date.strftime("%Y%m%d")
-
     if month <= 3:
         qtr = "QTR1"
     elif month <= 6:
@@ -90,7 +80,6 @@ def get_index_urls_for_date(date):
         qtr = "QTR3"
     else:
         qtr = "QTR4"
-
     return [
         f"{base}/{year}/{qtr}/master.{day}.idx.gz",
         f"{base}/{year}/{qtr}/master.{day}.idx"
@@ -136,18 +125,12 @@ def parse_master_index(url):
     return entries
 
 def get_primary_document_url(submission_path):
-    """
-    Given a submission .txt path from the master index,
-    locate and return the primary document URL.
-    """
     url = f"https://www.sec.gov/Archives/{submission_path}"
     r = requests.get(url, headers=HEADERS, timeout=15)
     time.sleep(REQUEST_DELAY)
-
     matches = re.findall(r"<FILENAME>(.+)", r.text)
     if not matches:
-        return None
-
+        return url  # fallback to submission URL
     base_dir = submission_path.rsplit("/", 1)[0]
     return f"https://www.sec.gov/Archives/{base_dir}/{matches[0].strip()}"
 
@@ -158,7 +141,6 @@ for day_offset in range(BACKFILL_DAYS):
     date = datetime.utcnow() - timedelta(days=day_offset)
     for idx_url in get_index_urls_for_date(date):
         filings = parse_master_index(idx_url)
-
         for f in filings:
             try:
                 primary_url = get_primary_document_url(f["path"])
@@ -167,34 +149,38 @@ for day_offset in range(BACKFILL_DAYS):
 
                 r = requests.get(primary_url, headers=HEADERS, timeout=15)
                 time.sleep(REQUEST_DELAY)
-                text = BeautifulSoup(r.text, "lxml").get_text("\n")
+
+                if is_xml(r.text):
+                    item4 = extract_item_4_from_xml(r.text)
+                else:
+                    text = BeautifulSoup(r.text, "lxml").get_text("\n")
+                    item4 = extract_item_4_from_text(text)
+
+                if not item4:
+                    continue
+
+                if not any(k.lower() in item4.lower() for k in KEYWORDS):
+                    continue
+
+                highlighted = highlight_keywords(item4)
+                highlighted = highlight_company(highlighted, f["company"])
+
+                item_hash = hash_text(highlighted)
+                if seen_hashes.get(f["path"]) == item_hash:
+                    continue
+                seen_hashes[f["path"]] = item_hash
+
+                label = "NEW" if f["form_type"] == "SC 13D" else "AMENDED"
+                emoji = "⚡" if label == "NEW" else "🔄"
+
+                items.append({
+                    "title": f"[{label}] {emoji} {f['company']} ({f['form_type']})",
+                    "link": primary_url,
+                    "content": highlighted,
+                    "date": datetime.strptime(f["date_filed"], "%Y-%m-%d")
+                })
             except Exception:
                 continue
-
-            if not any(k.lower() in text.lower() for k in KEYWORDS):
-                continue
-
-            item4 = extract_item_4(text)
-            if not item4:
-                continue
-
-            highlighted = highlight_keywords(item4)
-            highlighted = highlight_company(highlighted, f["company"])
-
-            item_hash = hash_text(highlighted)
-            if seen_hashes.get(f["path"]) == item_hash:
-                continue
-            seen_hashes[f["path"]] = item_hash
-
-            label = "NEW" if f["form_type"] == "SC 13D" else "AMENDED"
-            emoji = "⚡" if label == "NEW" else "🔄"
-
-            items.append({
-                "title": f"[{label}] {emoji} {f['company']} ({f['form_type']})",
-                "link": primary_url,
-                "content": highlighted,
-                "date": datetime.strptime(f["date_filed"], "%Y-%m-%d")
-            })
 
 # --- Generate RSS feed ---
 with open(FEED_FILE, "w", encoding="utf-8") as f:
