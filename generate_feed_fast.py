@@ -8,8 +8,10 @@ import hashlib
 import os
 
 # --- User Config ---
-KEYWORDS = ["100%", "100 %", "all shares", "fully acquire", "buyout",
-            "takeover", "converted", "merger agreement"]
+KEYWORDS = [
+    "100%", "100 %", "all shares", "fully acquire", "buyout",
+    "takeover", "converted", "merger agreement"
+]
 HASH_FILE = "seen_item4.json"
 FEED_FILE = "feed.xml"
 
@@ -25,27 +27,41 @@ def hash_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 def extract_item_4_from_xml(xml):
+    # Try XML-style Item 4
     match = re.search(r'<item[_\s]*4.*?>(.*?)</item[_\s]*4>', xml, re.I | re.S)
     if match:
         return match.group(1).strip()
-    match2 = re.search(r'<TEXT>(.*?)</TEXT>', xml, re.I | re.S)
-    if match2:
-        return match2.group(1).strip()
-    return None
+
+    # Fallback: legacy text filings
+    match2 = re.search(r'ITEM\s+4[\.\-–—:\s]*PURPOSE\s+OF\s+TRANSACTION', xml, re.I)
+    if not match2:
+        return None
+
+    end = re.search(r'ITEM\s+5[\.\-–—:\s]', xml[match2.end():], re.I)
+    return (xml[match2.end(): match2.end() + end.start()].strip() if end else xml[match2.end():].strip())
 
 def highlight_keywords(text):
     for kw in KEYWORDS:
-        text = re.sub(kw, lambda m: f"<strong>{m.group(0)}</strong>", text, flags=re.I)
+        pattern = re.compile(re.escape(kw), re.I)
+        text = pattern.sub(lambda m: f"<strong>{m.group(0)}</strong>", text)
     return text
 
 def highlight_company(text, company):
     return re.sub(re.escape(company), f"<strong>{company}</strong>", text, flags=re.I)
 
-# --- Known filing for test ---
+def keyword_match(text, keywords):
+    """Robust keyword matching using regex to avoid issues with line breaks, encoding, etc."""
+    for kw in keywords:
+        pattern = re.compile(re.escape(kw), re.I)
+        if pattern.search(text):
+            return True
+    return False
+
+# --- Known filing for testing ---
 known_filing = {
-    "company": "Example Corp",
+    "company": "SilverCape",
     "form_type": "SC 13D",
-    "date_filed": "2025-12-11",
+    "date_filed": "2025-12-10",
     "url": "https://www.sec.gov/Archives/edgar/data/1040130/000121390025120354/xslSCHEDULE_13D_X01/primary_doc.xml"
 }
 
@@ -53,11 +69,11 @@ known_filing = {
 items = []
 
 try:
-    r = requests.get(known_filing["url"], headers={"User-Agent": "JellysList-FastAlert-Test"})
+    r = requests.get(known_filing["url"], headers={"User-Agent": "JellysList-FastAlert/1.1"})
     xml_text = r.text
     item4 = extract_item_4_from_xml(xml_text)
 
-    if item4 and any(k.lower() in item4.lower() for k in KEYWORDS):
+    if item4 and keyword_match(item4, KEYWORDS):
         highlighted = highlight_keywords(item4)
         highlighted = highlight_company(highlighted, known_filing["company"])
 
@@ -96,4 +112,4 @@ with open(FEED_FILE, "w", encoding="utf-8") as f:
 with open(HASH_FILE, "w", encoding="utf-8") as f:
     json.dump(seen_hashes, f, indent=2)
 
-print(f"Test feed generated in {FEED_FILE} with {len(items)} item(s).")
+print(f"Feed generated in {FEED_FILE} with {len(items)} item(s).")
