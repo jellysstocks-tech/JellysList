@@ -15,18 +15,18 @@ HEADERS = {
     "User-Agent": "JellysList-FastAlert/2.0 (contact: jellysstocks@gmail.com)"
 }
 
-FEED_FILE = "feed.xml"
-HASH_FILE = "seen_item4.json"
-BACKFILL_DAYS = 7
-MAX_FEED_ITEMS = 50
-REQUEST_DELAY = 0.5  # seconds
-MAX_RETRIES = 3
-RETRY_DELAY = 5  # seconds
-
 KEYWORDS = [
     "100%", "100 %", "all shares", "fully acquire", "buyout",
     "takeover", "converted", "merger agreement"
 ]
+
+HASH_FILE = "seen_item4.json"
+FEED_FILE = "feed.xml"
+BACKFILL_DAYS = 7
+REQUEST_DELAY = 0.5
+MAX_FEED_ITEMS = 50
+MAX_RETRIES = 3
+RETRY_DELAY = 5  # seconds
 
 # --- Load previous hashes ---
 if os.path.exists(HASH_FILE):
@@ -40,16 +40,18 @@ def hash_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 def extract_item_4(text):
-    # XML-style Item 4 (most modern filings)
-    xml_match = re.search(r'<ITEM[_\s]*4[^>]*>(.*?)</ITEM[_\s]*4>', text, re.I | re.S)
+    """Extract Item 4 from filing text (flexible)."""
+    # Try XML-style first
+    xml_match = re.search(r'<item[_\s]*4[^>]*>(.*?)</item[_\s]*4>', text, re.I | re.S)
     if xml_match:
         return xml_match.group(1).strip()
-    # Legacy plain-text filings
+
+    # Plain-text fallback
     start = re.search(r'ITEM\s+4[\.\-–—:\s]*PURPOSE\s+OF\s+TRANSACTION', text, re.I)
     if not start:
         return None
     end = re.search(r'ITEM\s+5[\.\-–—:\s]', text[start.end():], re.I)
-    return text[start.end():start.end()+end.start()].strip() if end else text[start.end():].strip()
+    return text[start.end(): start.end() + end.start()].strip() if end else text[start.end():].strip()
 
 def highlight_keywords(text):
     for kw in KEYWORDS:
@@ -64,67 +66,72 @@ def keyword_match(text):
     return any(re.search(re.escape(k), text, re.I) for k in KEYWORDS)
 
 def get_index_urls_for_date(date):
-    # SEC master index path by quarter
+    """Return master index URLs (.idx and .idx.gz) for a given date."""
+    base = "https://www.sec.gov/Archives/edgar/daily-index"
     yyyy = date.year
-    mm = date.month
-    dd = date.strftime("%d")
-    if mm <= 3:
+    mm = f"{date.month:02d}"
+    dd = f"{date.day:02d}"
+
+    if date.month <= 3:
         qtr = "QTR1"
-    elif mm <= 6:
+    elif date.month <= 6:
         qtr = "QTR2"
-    elif mm <= 9:
+    elif date.month <= 9:
         qtr = "QTR3"
     else:
         qtr = "QTR4"
-    day_str = date.strftime("%Y%m%d")
-    base = f"https://www.sec.gov/Archives/edgar/daily-index/{yyyy}/{qtr}"
-    return [f"{base}/master.{day_str}.idx", f"{base}/master.{day_str}.idx.gz"]
+
+    return [
+        f"{base}/{yyyy}/{qtr}/master.{yyyy}{mm}{dd}.idx.gz",
+        f"{base}/{yyyy}/{qtr}/master.{yyyy}{mm}{dd}.idx"
+    ]
 
 def parse_master_index(url):
-    for attempt in range(MAX_RETRIES):
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=15)
-            time.sleep(REQUEST_DELAY)
-            if r.status_code != 200:
-                continue
-            content = r.content
-            if url.endswith(".gz"):
-                with gzip.GzipFile(fileobj=io.BytesIO(content)) as f:
-                    content = f.read()
-            content = content.decode("latin1")
-            entries = []
-            in_data = False
-            for line in content.splitlines():
-                if line.startswith("CIK|"):
-                    in_data = True
-                    continue
-                if not in_data:
-                    continue
-                parts = line.split("|")
-                if len(parts) < 5:
-                    continue
-                cik, company, form_type, date_filed, path = parts
-                if form_type not in ("SC 13D", "SC 13D/A"):
-                    continue
-                filing_dt = datetime.strptime(date_filed, "%Y-%m-%d")
-                if filing_dt < datetime.utcnow() - timedelta(days=BACKFILL_DAYS):
-                    continue
-                entries.append({
-                    "cik": cik,
-                    "company": company,
-                    "form_type": form_type,
-                    "date_filed": date_filed,
-                    "path": path
-                })
-            return entries
-        except Exception:
-            time.sleep(RETRY_DELAY)
-    return []
-
-def fetch_filing_text(submission_path):
-    url = f"https://www.sec.gov/Archives/{submission_path}"
+    """Parse SEC master index to find SC 13D/13D/A filings."""
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
+        time.sleep(REQUEST_DELAY)
+        if r.status_code != 200:
+            return []
+        content = r.content
+        if url.endswith(".gz"):
+            with gzip.GzipFile(fileobj=io.BytesIO(content)) as f:
+                content = f.read()
+        content = content.decode("latin1")
+    except Exception:
+        return []
+
+    entries = []
+    in_data = False
+    for line in content.splitlines():
+        if line.startswith("CIK|"):
+            in_data = True
+            continue
+        if not in_data:
+            continue
+        parts = line.split("|")
+        if len(parts) < 5:
+            continue
+        cik, company, form_type, date_filed, path = parts
+        if form_type not in ("SC 13D", "SC 13D/A"):
+            continue
+        filing_dt = datetime.strptime(date_filed, "%Y-%m-%d")
+        if filing_dt < datetime.utcnow() - timedelta(days=BACKFILL_DAYS):
+            continue
+        entries.append({
+            "cik": cik,
+            "company": company,
+            "form_type": form_type,
+            "date_filed": date_filed,
+            "path": path
+        })
+    return entries
+
+def fetch_filing_text(submission_path):
+    """Fetch the primary SC 13D/13D-A document text."""
+    try:
+        base_dir = submission_path.rsplit("/", 1)[0]
+        r = requests.get(f"https://www.sec.gov/Archives/{submission_path}", headers=HEADERS, timeout=15)
         time.sleep(REQUEST_DELAY)
         if r.status_code != 200:
             return None
@@ -132,24 +139,35 @@ def fetch_filing_text(submission_path):
     except Exception:
         return None
 
-# --- Main Processing ---
+# --- Main processing ---
 items = []
 
 for day_offset in range(BACKFILL_DAYS):
     date = datetime.utcnow() - timedelta(days=day_offset)
     index_urls = get_index_urls_for_date(date)
-    filings = []
+
+    successful_index = False
     for idx_url in index_urls:
-        filings = parse_master_index(idx_url)
-        if filings:
+        for attempt in range(1, MAX_RETRIES + 1):
+            filings = parse_master_index(idx_url)
+            if filings:
+                successful_index = True
+                break
+            else:
+                print(f"[WARN] Failed to parse index {idx_url}, attempt {attempt}/{MAX_RETRIES}")
+                time.sleep(RETRY_DELAY)
+        if successful_index:
             break
-    if not filings:
+
+    if not successful_index:
         print(f"[WARN] Could not fetch index for {date.strftime('%Y-%m-%d')}. Skipping.")
         continue
 
     for f in filings:
         text = fetch_filing_text(f["path"])
-        if not text or not keyword_match(text):
+        if not text:
+            continue
+        if not keyword_match(text):
             continue
         item4 = extract_item_4(text)
         if not item4:
@@ -176,6 +194,7 @@ with open(FEED_FILE, "w", encoding="utf-8") as f:
     f.write('<title>SEC Schedule 13D Item 4 (Fast Alert Enhanced)</title>\n')
     f.write('<link>https://www.sec.gov</link>\n')
     f.write('<description>Item 4 from SC 13D and 13D/A filings containing buyout-related keywords</description>\n')
+
     for i in sorted(items, key=lambda x: x["date"], reverse=True)[:MAX_FEED_ITEMS]:
         f.write("<item>\n")
         f.write(f"<title>{i['title']}</title>\n")
@@ -183,6 +202,7 @@ with open(FEED_FILE, "w", encoding="utf-8") as f:
         f.write(f"<pubDate>{format_datetime(i['date'])}</pubDate>\n")
         f.write(f"<description><![CDATA[{i['content']}<br><a href='{i['link']}'>Full Filing</a>]]></description>\n")
         f.write("</item>\n")
+
     f.write("</channel></rss>")
 
 # --- Save hash record ---
