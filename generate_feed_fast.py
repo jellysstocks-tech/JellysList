@@ -55,12 +55,22 @@ def highlight_company(text, company):
 
 def get_index_urls_for_date(date):
     base = "https://www.sec.gov/Archives/edgar/daily-index"
-    yyyy = date.strftime("%Y")
-    mm = date.strftime("%m")
-    dd = date.strftime("%d")
+    year = date.year
+    month = date.month
+    day = date.strftime("%Y%m%d")
+
+    if month <= 3:
+        qtr = "QTR1"
+    elif month <= 6:
+        qtr = "QTR2"
+    elif month <= 9:
+        qtr = "QTR3"
+    else:
+        qtr = "QTR4"
+
     return [
-        f"{base}/{yyyy}/{mm}/master.{yyyy}{mm}{dd}.idx",
-        f"{base}/{yyyy}/{mm}/master.{yyyy}{mm}{dd}.idx.gz"
+        f"{base}/{year}/{qtr}/master.{day}.idx.gz",
+        f"{base}/{year}/{qtr}/master.{day}.idx"
     ]
 
 def parse_master_index(url):
