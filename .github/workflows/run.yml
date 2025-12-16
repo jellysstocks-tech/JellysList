@@ -1,37 +1,36 @@
-name: Update SEC Fast-Alert Feed
+name: Generate SEC Feed
 
 on:
   schedule:
-    # Runs every 5 minutes
-    - cron: '*/5 * * * *'
-  workflow_dispatch:  # Allows manual run from GitHub UI
+    - cron: '0 18 * * *'  # Runs daily at 18:00 UTC
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'  # or your preferred version
-
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip
+          python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install feedparser beautifulsoup4 lxml requests
-
-      - name: Run SEC Fast-Alert Feed script
-        run: python generate_feed_fast.py
-
-      - name: Commit updated feed.xml and seen_item4.json
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add feed.xml seen_item4.json
-          git commit -m "Update feed via GitHub Actions" || echo "No changes to commit"
+          python -m pip install --upgrade pip
+          pip install beautifulsoup4 lxml edgar-tools
+
+      - name: Run feed generation
+        run: |
+          python generate_feed_fast.py
+
+      - name: Commit and push feed.xml
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git add feed.xml
+          git commit -m "Update SEC feed" || echo "No changes to commit"
           git push
